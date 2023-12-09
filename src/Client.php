@@ -32,15 +32,14 @@ class Client
 {
 
     /**
-     * Grant type for authorization code
+     * Grant type
      */
     const OAUTH2_GRANT_TYPE = 'authorization_code';
 
     /**
-     * Gran type for refresh token
+     * Grant type
      */
-
-    const OAUTH2_REFRESH_TOKEN = 'refresh_token';
+    const REFRESH_TOKEN_GRANT_TYPE = 'refresh_token';
 
     /**
      * Response type
@@ -109,6 +108,8 @@ class Client
      * @var bool
      */
     protected $useTokenParam = false;
+
+    protected $httpHandler = null;
 
     /**
      * @return bool
@@ -285,7 +286,8 @@ class Client
                     'Content-Type' => 'application/json',
                     'x-li-format' => 'json',
                     'Connection' => 'Keep-Alive'
-                ]
+                ],
+                'handler' => $this->httpHandler
             ]);
             try {
                 $response = $guzzle->post($uri, ['form_params' => [
@@ -306,40 +308,37 @@ class Client
     }
 
     /**
-     * Retrieve Access Token from Previously stored Refresh Token
-     * If Refresh Token is not provided nor setted, will return null
-
      *
-     * @param string $refreshToken
-     *
-     * @return \LinkedIn\AccessToken|null
-     * @throws \LinkedIn\Exception
+     * @param AccessToken $token
+     * @return AccessToken
      */
-    public function renewTokenFromRefreshToken($refreshToken = '')
+    public function refreshAccessToken(AccessToken $token)
     {
-        if (!empty($refreshToken)) {
-            $uri = $this->buildUrl('accessToken', []);
-            $guzzle = new GuzzleClient([
-                'headers' => [
-                    'Content-Type' => 'application/json',
-                    'x-li-format' => 'json',
-                    'Connection' => 'Keep-Alive'
-                ]
-            ]);
-            try {
-                $response = $guzzle->post($uri, ['form_params' => [
-                    'grant_type' => self::OAUTH2_REFRESH_TOKEN,
-                    'refresh_token' => $refreshToken,
-                    'client_id' => $this->getClientId(),
-                    'client_secret' => $this->getClientSecret(),
-                ]]);
-            } catch (RequestException $exception) {
-                throw Exception::fromRequestException($exception);
-            }
-            $this->setAccessToken(
-                AccessToken::fromResponse($response)
-            );
+        $uri = $this->buildUrl('accessToken', []);
+        $guzzle = new GuzzleClient([
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'x-li-format' => 'json',
+                'Connection' => 'Keep-Alive'
+            ],
+            'handler' => $this->httpHandler
+        ]);
+
+        try {
+            $response = $guzzle->post($uri, ['form_params' => [
+                'grant_type' => self::REFRESH_TOKEN_GRANT_TYPE,
+                'refresh_token' => $token->getRefreshToken(),
+                'client_id' => $this->getClientId(),
+                'client_secret' => $this->getClientSecret(),
+            ]]);
+        } catch (RequestException $exception) {
+            throw Exception::fromRequestException($exception);
         }
+
+        $this->setAccessToken(
+            AccessToken::fromResponse($response)
+        );
+
         return $this->accessToken;
     }
 
@@ -352,18 +351,14 @@ class Client
      */
     public static function responseToArray($response)
     {
-        if ($contents = $response->getBody()->getContents()) {
+        $strResponse = $response->getBody()->getContents();
+        if(strlen($strResponse) > 1) {
             return \GuzzleHttp\json_decode(
-                $contents,
+                $strResponse,
                 true
             );
         }
-
-        if ($contents = $response->getHeaders()) {
-             return $contents;
-        }
-
-        return [];
+        return $response;
     }
 
     /**
@@ -441,6 +436,22 @@ class Client
     {
         $this->state = $state;
         return $this;
+    }
+
+    /**
+     * @return null
+     */
+    public function getHttpHandler()
+    {
+        return $this->httpHandler;
+    }
+
+    /**
+     * @param null $httpHandler
+     */
+    public function setHttpHandler($httpHandler): void
+    {
+        $this->httpHandler = $httpHandler;
     }
 
     /**
@@ -534,6 +545,7 @@ class Client
     public function api($endpoint, array $params = [], $method = Method::GET)
     {
         $headers = $this->getApiHeaders();
+        $options = $this->prepareOptions($params, $method);
         Method::isMethodSupported($method);
         if ($this->isUsingTokenParam()) {
             $params['oauth2_access_token'] = $this->accessToken->getToken();
@@ -543,13 +555,13 @@ class Client
         $guzzle = new GuzzleClient([
             'base_uri' => $this->getApiRoot(),
             'headers' => $headers,
+            'handler' => $this->httpHandler
         ]);
         if (!empty($params) && Method::GET === $method) {
             $endpoint .= '?' . Query::build($params);
         }
-
         try {
-            $response = $guzzle->request($method, $endpoint, $params);
+            $response = $guzzle->request($method, $endpoint, $options);
         } catch (RequestException $requestException) {
             throw Exception::fromRequestException($requestException);
         }
@@ -571,15 +583,16 @@ class Client
     }
 
     /**
-     * @param $endpoint
-     * @param array $params
-     * @param bool $rawData
+     * Make API call to LinkedIn using POST method
+     *
+     * @param string $endpoint
+     * @param array  $params
+     *
      * @return array
-     * @throws Exception
+     * @throws \LinkedIn\Exception
      */
-    public function post($endpoint, array $params = [], bool $rawData = false)
+    public function post($endpoint, array $params = [])
     {
-        $params = $this->prepareOptions($params, $rawData);
         return $this->api($endpoint, $params, Method::POST);
     }
 
@@ -606,14 +619,12 @@ class Client
     {
         $headers = $this->getApiHeaders();
         unset($headers['Content-Type']);
-        //$headers = [];
-        if ($this->isUsingTokenParam()) {
-            //
-        } else {
+        if (!$this->isUsingTokenParam()) {
             $headers['Authorization'] = 'Bearer ' . $this->accessToken->getToken();
         }
         $guzzle = new GuzzleClient([
-            'base_uri' => $this->getApiRoot()
+            'base_uri' => $this->getApiRoot(),
+            'handler' => $this->httpHandler
         ]);
         $fileinfo = pathinfo($path);
         $filename = preg_replace('/\W+/', '_', $fileinfo['filename']);
@@ -640,17 +651,15 @@ class Client
 
     /**
      * @param array $params
-     * @param bool $rawData
-     * @return array
+     * @param string $method
+     * @return mixed
      */
-    protected function prepareOptions(array $params, bool $rawData = false)
+    protected function prepareOptions(array $params, $method)
     {
         $options = [];
-        if ($rawData) {
-            $options['body'] = Query::build($params, false);
-            return $options;
+        if ($method === Method::POST || $method === Method::PUT ) {
+            $options['body'] = \GuzzleHttp\json_encode($params);
         }
-        $options['body'] = \GuzzleHttp\json_encode($params);
         return $options;
     }
 }
